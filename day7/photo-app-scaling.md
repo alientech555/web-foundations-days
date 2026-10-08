@@ -62,16 +62,21 @@ Relational databases are optimized for structured metadata and fast indexing, no
 - **Thumbnail Worker:** Asynchronously consumes messages from the queue to resize original photos into thumbnails, preventing CPU-intensive tasks from blocking the main application.
 - **Object Storage:** Provides a highly durable, scalable, and cost-effective solution for storing large, unstructured binary files like original photos and generated thumbnails.
 
-## 7. Step-by-Step Photo Upload Flow
-- The user selects a photo in the app, which sends an HTTP POST request with the image data to the Load Balancer.
-- The Load Balancer routes the request to an available App Server.
-- The App Server uploads the original photo directly to Object Storage and receives a unique URL in return.
-- The App Server writes the photo's metadata (including the Object Storage URL, user ID, and timestamp) to the Primary Database.
-- The App Server publishes a "generate thumbnail" message containing the photo's Object Storage URL to the Message Queue.
-- The App Server immediately returns a success response to the user, ensuring a fast, non-blocking UI experience.
-- In the background, the Thumbnail Worker picks up the message from the Queue, downloads the original photo from Object Storage, resizes it to 50 KB, and saves the thumbnail back to Object Storage.
-- The Worker updates the photo's metadata in the Primary Database with the new thumbnail URL, completing the asynchronous job.
+## 7. Step-by-Step Photo Upload Flow (Including Background Processing)
+1. The user selects a photo, and the App Server receives the HTTP POST request.
+2. The App Server uploads the 2 MB original photo directly to Object Storage and receives a unique URL.
+3. The App Server writes the photo's metadata (user ID, timestamp, original URL) to the Primary Database.
+4. The App Server publishes a "generate thumbnail" message containing the photo's Object Storage URL to the Message Queue.
+5. The App Server immediately returns an HTTP 200 OK success response to the user, ensuring a fast, non-blocking UI experience.
+6. **Background Processing Begins:** The Thumbnail Worker (running on separate, dedicated compute instances) continuously polls the Message Queue for new jobs.
+7. The Worker pulls the message, downloads the 2 MB original photo from Object Storage into its memory.
+8. The Worker processes the image, resizing and compressing it into a 50 KB thumbnail.
+9. The Worker uploads the newly generated 50 KB thumbnail back to Object Storage.
+10. Finally, the Worker updates the photo's metadata in the Primary Database with the new thumbnail URL, completing the asynchronous job. *(Note: If the worker fails at any step, the message remains in the queue or moves to a dead-letter queue for automatic retry, ensuring no thumbnails are lost).*
 
 ## 8. Trade-offs
-- **Trade-off 1: Eventual Consistency vs. Immediate Consistency in Feeds.** Pre-computing feeds (fan-out on write) makes reading extremely fast for the end user, but it introduces a slight delay (eventual consistency) before a new post appears in all followers' feeds, and it consumes significant cache/storage space for celebrity users with millions of followers.
-- **Trade-off 2: Synchronous vs. Asynchronous Uploads.** Uploading the image synchronously through the app server guarantees the image is saved before responding, but it blocks the server thread, increases latency, and consumes app server bandwidth. Using direct-to-storage uploads (e.g., via presigned URLs) is much faster and more scalable, but it adds complexity to the client-side implementation and requires careful security validation to prevent unauthorized uploads.
+- **Trade-off 1: Eventual Consistency (Read Replicas) vs. Strict Read Consistency.** 
+  By using Read Replicas to handle the massive volume of feed views, we introduce *replication lag*. This means if a user uploads a photo and immediately refreshes their feed, the photo might not appear instantly (Eventual Consistency). We are trading strict, immediate read consistency for massive gains in read scalability and system availability. If we demanded strict consistency, all reads would have to hit the Primary Database, creating a severe bottleneck that would crash the system under peak load.
+  
+- **Trade-off 2: Fan-out on Write (Push) vs. Fan-out on Read (Pull) for Feed Generation.** 
+  To build a user's feed, we can either "fan-out on write" (push the new photo ID into every follower's pre-computed cache the moment it is uploaded) or "fan-out on read" (query the database for all followed users' posts when the user opens the app). Fan-out on write makes reading the feed blazing fast (O(1) cache lookup) but makes uploading incredibly slow and resource-intensive for users with millions of followers. Fan-out on read makes uploading instant but makes reading the feed very slow and database-heavy. We must explicitly trade off write latency and cache storage space for read latency.
