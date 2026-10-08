@@ -56,7 +56,7 @@ This document outlines the RESTful API endpoints for managing a library's book c
 - **Description:** Retrieves a list of books filtered by a specific author's name using a query parameter.
 - **Success Status Code:** `200 OK`
 
-## Error Codes
+# Error Codes
 
 ### 400 Bad Request
 - **Example:** The client sends a `POST /books` request with a missing required field (e.g., omitting the `"title"` or `"author"` in the request body), or provides an invalid data type.
